@@ -25,8 +25,6 @@ class TanYard extends LitElement {
     board: { type: Object },
     picked: { type: Object },
     activeRow: { type: Number },
-    ghostCode: { type: String },
-    ghostPh: { type: Object },
     ph: { type: String },
     err: { type: String },
     username: { type: String },
@@ -57,12 +55,11 @@ class TanYard extends LitElement {
     this.board = null;
     this.picked = null;
     this.activeRow = 0;
-    this.ghostCode = null;
-    this.ghostPh = null;
     this.ph = "4.2";
     this.err = "";
     this.username = "admin";
     this.password = "123456";
+    this._refreshSeq = 0;
   }
 
   connectedCallback() {
@@ -71,26 +68,33 @@ class TanYard extends LitElement {
   }
 
   async refresh() {
+    const seq = ++this._refreshSeq;
     try {
-      this.board = await api("/api/board");
+      const board = await api("/api/board");
+      if (seq !== this._refreshSeq) return; // 已有更新的装载，丢弃晚到的旧响应
+      this.board = board;
       if (this.picked) {
-        this.picked = this.board.pits.find((p) => p.id === this.picked.id) || this.board.pits[0];
+        // 票夹必须留在当前行签：按 id 找回原坑，找不到才退回当前行的坑
+        this.picked =
+          board.pits.find((p) => p.id === this.picked.id) ||
+          board.pits.find((p) => p.row === this.activeRow) ||
+          null;
       }
-      // 整页装载会换对象，留影字段故意不清，点行签与刷新对不齐
     } catch (e) {
-      this.err = e.message;
+      if (seq === this._refreshSeq) this.err = e.message;
     }
   }
 
   pickRow(row) {
-    const prev = this.picked;
-    const rowPits = (this.board?.pits || []).filter((p) => p.row === row);
-    if (prev && prev.row !== row) {
-      this.ghostCode = prev.code;
-      this.ghostPh = prev.latestPh;
-    }
     this.activeRow = row;
+    const rowPits = (this.board?.pits || []).filter((p) => p.row === row);
     if (rowPits.length) this.picked = rowPits[0];
+  }
+
+  pickPit(pit) {
+    // 点哪行的坑，行签就跟到哪行，票夹与行签始终同属一行
+    this.activeRow = pit.row;
+    this.picked = pit;
   }
 
   async login(e) {
@@ -111,11 +115,15 @@ class TanYard extends LitElement {
 
   async writePh() {
     this.err = "";
+    const pitId = this.picked?.id;
+    if (pitId === undefined) return;
     try {
-      this.picked = await api(`/api/pits/${this.picked.id}/samples`, {
+      const updated = await api(`/api/pits/${pitId}/samples`, {
         method: "POST",
         body: JSON.stringify({ ph: Number(this.ph) }),
       });
+      // 落地前确认抽屉仍停在该坑；换行后晚到的响应不得劫持票夹
+      if (this.picked?.id === pitId) this.picked = updated;
       await this.refresh();
     } catch (ex) {
       this.err = ex.message;
@@ -124,11 +132,14 @@ class TanYard extends LitElement {
 
   async setStatus(status) {
     this.err = "";
+    const pitId = this.picked?.id;
+    if (pitId === undefined) return;
     try {
-      this.picked = await api(`/api/pits/${this.picked.id}/status`, {
+      const updated = await api(`/api/pits/${pitId}/status`, {
         method: "POST",
         body: JSON.stringify({ status }),
       });
+      if (this.picked?.id === pitId) this.picked = updated;
       await this.refresh();
     } catch (ex) {
       this.err = ex.message;
@@ -171,7 +182,7 @@ class TanYard extends LitElement {
         ${this.board.pits.map(
           (p) => html`<button
             class="pit ${p.status}${this.activeRow === p.row ? " is-row-active" : ""}"
-            @click=${() => (this.picked = p)}
+            @click=${() => this.pickPit(p)}
           >
             <strong>${p.code}</strong><br />${LABELS[p.status]}
           </button>`
@@ -179,9 +190,9 @@ class TanYard extends LitElement {
       </div>
       ${this.picked
         ? html`<section>
-            <h3>${this.ghostCode || this.picked.code} · ${LABELS[this.picked.status]}</h3>
+            <h3>${this.picked.code} · ${LABELS[this.picked.status]}</h3>
             <p>
-              最近酸碱度：${(this.ghostPh !== null && this.ghostPh !== undefined ? this.ghostPh : this.picked.latestPh) ?? "无"} ·
+              最近酸碱度：${this.picked.latestPh ?? "无"} ·
               ${this.picked.sampleCount} 次
             </p>
             <input .value=${this.ph} @input=${(e) => (this.ph = e.target.value)} />
