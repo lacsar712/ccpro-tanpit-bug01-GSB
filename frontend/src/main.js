@@ -25,8 +25,6 @@ class TanYard extends LitElement {
     board: { type: Object },
     picked: { type: Object },
     activeRow: { type: Number },
-    ghostCode: { type: String },
-    ghostPh: { type: Object },
     ph: { type: String },
     err: { type: String },
     username: { type: String },
@@ -57,8 +55,8 @@ class TanYard extends LitElement {
     this.board = null;
     this.picked = null;
     this.activeRow = 0;
-    this.ghostCode = null;
-    this.ghostPh = null;
+    this._selEpoch = 0; // 点选代次：后点中的行签独占抽屉，迟到响应不得抢占
+    this._refreshSeq = 0; // 刷新序号：只采用最后一次场图快照
     this.ph = "4.2";
     this.err = "";
     this.username = "admin";
@@ -71,26 +69,31 @@ class TanYard extends LitElement {
   }
 
   async refresh() {
+    const seq = ++this._refreshSeq;
     try {
-      this.board = await api("/api/board");
-      if (this.picked) {
-        this.picked = this.board.pits.find((p) => p.id === this.picked.id) || this.board.pits[0];
-      }
-      // 整页装载会换对象，留影字段故意不清，点行签与刷新对不齐
+      const board = await api("/api/board");
+      if (seq !== this._refreshSeq) return; // 已有更新的快照在途，丢弃迟到响应
+      this.board = board;
+      const pits = board.pits;
+      const kept = this.picked && pits.find((p) => p.id === this.picked.id);
+      // 票夹始终落在当前行签：原坑不在了就取本行首坑，与整页重载对齐
+      this.picked = kept || pits.find((p) => p.row === this.activeRow) || null;
     } catch (e) {
-      this.err = e.message;
+      if (seq === this._refreshSeq) this.err = e.message;
     }
   }
 
   pickRow(row) {
-    const prev = this.picked;
-    const rowPits = (this.board?.pits || []).filter((p) => p.row === row);
-    if (prev && prev.row !== row) {
-      this.ghostCode = prev.code;
-      this.ghostPh = prev.latestPh;
-    }
+    this._selEpoch += 1;
     this.activeRow = row;
-    if (rowPits.length) this.picked = rowPits[0];
+    const rowPits = (this.board?.pits || []).filter((p) => p.row === row);
+    this.picked = rowPits[0] || null;
+  }
+
+  pickPit(pit) {
+    this._selEpoch += 1;
+    this.activeRow = pit.row;
+    this.picked = pit;
   }
 
   async login(e) {
@@ -111,11 +114,16 @@ class TanYard extends LitElement {
 
   async writePh() {
     this.err = "";
+    const pit = this.picked;
+    if (!pit) return;
+    const epoch = this._selEpoch;
     try {
-      this.picked = await api(`/api/pits/${this.picked.id}/samples`, {
+      const updated = await api(`/api/pits/${pit.id}/samples`, {
         method: "POST",
         body: JSON.stringify({ ph: Number(this.ph) }),
       });
+      // 等待期间若已换行签，后点中的一行独占抽屉，迟到响应直接丢弃
+      if (epoch === this._selEpoch && this.picked?.id === pit.id) this.picked = updated;
       await this.refresh();
     } catch (ex) {
       this.err = ex.message;
@@ -124,11 +132,15 @@ class TanYard extends LitElement {
 
   async setStatus(status) {
     this.err = "";
+    const pit = this.picked;
+    if (!pit) return;
+    const epoch = this._selEpoch;
     try {
-      this.picked = await api(`/api/pits/${this.picked.id}/status`, {
+      const updated = await api(`/api/pits/${pit.id}/status`, {
         method: "POST",
         body: JSON.stringify({ status }),
       });
+      if (epoch === this._selEpoch && this.picked?.id === pit.id) this.picked = updated;
       await this.refresh();
     } catch (ex) {
       this.err = ex.message;
@@ -171,7 +183,7 @@ class TanYard extends LitElement {
         ${this.board.pits.map(
           (p) => html`<button
             class="pit ${p.status}${this.activeRow === p.row ? " is-row-active" : ""}"
-            @click=${() => (this.picked = p)}
+            @click=${() => this.pickPit(p)}
           >
             <strong>${p.code}</strong><br />${LABELS[p.status]}
           </button>`
@@ -179,9 +191,9 @@ class TanYard extends LitElement {
       </div>
       ${this.picked
         ? html`<section>
-            <h3>${this.ghostCode || this.picked.code} · ${LABELS[this.picked.status]}</h3>
+            <h3>${this.picked.code} · ${LABELS[this.picked.status]}</h3>
             <p>
-              最近酸碱度：${(this.ghostPh !== null && this.ghostPh !== undefined ? this.ghostPh : this.picked.latestPh) ?? "无"} ·
+              最近酸碱度：${this.picked.latestPh ?? "无"} ·
               ${this.picked.sampleCount} 次
             </p>
             <input .value=${this.ph} @input=${(e) => (this.ph = e.target.value)} />

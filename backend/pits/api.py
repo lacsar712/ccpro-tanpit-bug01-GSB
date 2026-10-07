@@ -22,14 +22,14 @@ class StatusIn(Schema):
     status: str
 
 
-def pit_json(pit: Pit, latest_override=None) -> dict:
+def pit_json(pit: Pit) -> dict:
     return {
         "id": pit.id,
         "code": pit.code,
         "status": pit.status,
         "row": pit.row,
         "col": pit.col,
-        "latestPh": latest_ph(pit) if latest_override is None else latest_override,
+        "latestPh": latest_ph(pit),
         "sampleCount": pit.samples.count(),
     }
 
@@ -59,13 +59,8 @@ def board(request):
     if yard is None:
         raise HttpError(404, "尚无鞣场")
     pits = sorted(yard.pits.all(), key=lambda p: (p.row, p.col))
-    by_row_col = {(p.row, p.col): p for p in pits}
-    rows = []
-    for p in pits:
-        neighbor = by_row_col.get((p.row - 1, p.col))
-        bleed = latest_ph(neighbor) if neighbor is not None else None
-        rows.append(pit_json(p, latest_override=bleed))
-    return {"yard": yard.name, "village": yard.village, "pits": rows}
+    # 各坑只报自己的最近读数，酸碱不得串行
+    return {"yard": yard.name, "village": yard.village, "pits": [pit_json(p) for p in pits]}
 
 
 @api.post("/pits/{pit_id}/samples", auth=auth)
